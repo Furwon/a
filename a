@@ -1,0 +1,1284 @@
+--[[
+    ╔═══════════════════════════════════════════════════════════╗
+    ║                                                           ║
+    ║     ███╗   ██╗ ██████╗ ██╗   ██╗ █████╗                  ║
+    ║     ████╗  ██║██╔═══██╗██║   ██║██╔══██╗                 ║
+    ║     ██╔██╗ ██║██║   ██║██║   ██║███████║                 ║
+    ║     ██║╚██╗██║██║   ██║╚██╗ ██╔╝██╔══██║                 ║
+    ║     ██║ ╚████║╚██████╔╝ ╚████╔╝ ██║  ██║                 ║
+    ║     ╚═╝  ╚═══╝ ╚═════╝   ╚═══╝  ╚═╝  ╚═╝                 ║
+    ║                                                           ║
+    ║              Rivals  |  Aimbot & ESP                      ║
+    ║                                                           ║
+    ╚═══════════════════════════════════════════════════════════╝
+
+    Features:
+      • Aimbot       - FOV-based camera aim with smoothing
+      • Silent Aim   - Redirects projectiles (no camera move)
+      • Triggerbot   - Auto-fire on crosshair target
+      • ESP          - Box, Name, Health, Distance, Tracer, Chams
+
+    Hotkeys:
+      [Right Shift]  - Toggle Menu
+      [F1]           - Toggle ESP
+      [F2]           - Toggle Aimbot
+      [F3]           - Toggle Silent Aim
+      [End]          - Unload Nova
+--]]
+
+-- ═══════════════════════════════════════════════════════════════
+--  Unload previous instance
+-- ═══════════════════════════════════════════════════════════════
+if getgenv().Nova and getgenv().Nova.Unload then
+    pcall(getgenv().Nova.Unload)
+end
+
+if not game:IsLoaded() then game.Loaded:Wait() end
+
+-- ═══════════════════════════════════════════════════════════════
+--  Core services
+-- ═══════════════════════════════════════════════════════════════
+local Players           = game:GetService("Players")
+local RunService        = game:GetService("RunService")
+local UserInputService  = game:GetService("UserInputService")
+local HttpService       = game:GetService("HttpService")
+local TweenService      = game:GetService("TweenService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Workspace         = game:GetService("Workspace")
+local Lighting          = game:GetService("Lighting")
+
+local LP = Players.LocalPlayer
+local Camera = Workspace.CurrentCamera
+
+local cloneref = cloneref or function(x) return x end
+local gethui = gethui or function() return game:GetService("CoreGui") end
+
+-- ═══════════════════════════════════════════════════════════════
+--  Nova state
+-- ═══════════════════════════════════════════════════════════════
+local Nova = {
+    Connections = {},
+    Instances   = {},
+    Destroyed   = false,
+    Settings    = {
+        -- Aimbot
+        Aimbot = {
+            Enabled       = true,
+            Key           = "MouseButton2",
+            FOV           = 200,
+            FOVVisible    = true,
+            Smoothing     = 0.15,     -- 0 = instant, 1 = slow
+            TargetPart    = "Head",
+            WallCheck     = true,
+            MaxDistance   = 1000,
+            IgnoreTeam    = true,
+            VisibleOnly   = true,
+        },
+        -- Silent Aim
+        SilentAim = {
+            Enabled       = true,
+            Key           = "E",
+            Chance        = 100,
+            FOV           = 200,
+            TargetPart    = "Head",
+            WallCheck     = true,
+        },
+        -- Triggerbot
+        Triggerbot = {
+            Enabled       = false,
+            Delay         = 0.02,
+            FOV           = 40,
+            WallCheck     = true,
+        },
+        -- ESP
+        ESP = {
+            Enabled       = true,
+            ShowTeam      = false,
+            MaxDistance   = 1000,
+            Box           = true,
+            Name          = true,
+            Health        = true,
+            Distance      = true,
+            Tracer        = true,
+            Chams         = true,
+            Skeleton      = false,
+            HeadDot       = true,
+            TextColor     = Color3.fromRGB(255, 255, 255),
+            BoxColor      = Color3.fromRGB(255, 60, 60),
+            HealthColor   = Color3.fromRGB(0, 255, 100),
+            TracerColor   = Color3.fromRGB(255, 60, 60),
+            ChamsColor    = Color3.fromRGB(255, 60, 60),
+            ChamsFill     = 0.5,
+            ChamsOutline  = 0.9,
+        },
+        -- Misc
+        MenuKey = Enum.KeyCode.RightShift,
+    },
+}
+
+getgenv().Nova = Nova
+
+-- ═══════════════════════════════════════════════════════════════
+--  Utilities
+-- ═══════════════════════════════════════════════════════════════
+local function track(conn)
+    table.insert(Nova.Connections, conn)
+    return conn
+end
+
+local function keep(inst)
+    table.insert(Nova.Instances, inst)
+    return inst
+end
+
+local function safe(key)
+    local s = Nova.Settings
+    for part in key:gmatch("[^%.]+") do
+        s = s[part]
+        if s == nil then return nil end
+    end
+    return s
+end
+
+-- Get key for aimbot from string
+local function getKeyByName(name)
+    if name == "MouseButton1" then return Enum.UserInputType.MouseButton1 end
+    if name == "MouseButton2" then return Enum.UserInputType.MouseButton2 end
+    if name == "MouseButton3" then return Enum.UserInputType.MouseButton3 end
+    if name == "E" then return Enum.KeyCode.E end
+    if name == "Q" then return Enum.KeyCode.Q end
+    if name == "C" then return Enum.KeyCode.C end
+    if name == "F" then return Enum.KeyCode.F end
+    local ok, k = pcall(function() return Enum.KeyCode[name] end)
+    if ok then return k end
+    return Enum.UserInputType.MouseButton2
+end
+
+-- ═══════════════════════════════════════════════════════════════
+--  Rivals game helper layer
+-- ═══════════════════════════════════════════════════════════════
+local Game = {}
+
+-- Get all "enemy" characters
+function Game:GetFighters()
+    local out = {}
+    local myTeam = LP:GetAttribute("TeamID")
+    local myEnv  = LP:GetAttribute("EnvironmentID")
+
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr == LP then continue end
+        local char = plr.Character
+        if not char then continue end
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if not hum or hum.Health <= 0 then continue end
+        local root = char:FindFirstChild("HumanoidRootPart")
+        if not root then continue end
+
+        -- Environment check (Rivals separates matches by EnvironmentID)
+        local plrEnv = plr:GetAttribute("EnvironmentID")
+        if myEnv and plrEnv and plrEnv ~= myEnv then continue end
+
+        -- Team check
+        local plrTeam = plr:GetAttribute("TeamID")
+        local isTeam = (myTeam ~= nil and plrTeam ~= nil and myTeam == plrTeam)
+
+        if isTeam and Nova.Settings.Aimbot.IgnoreTeam then continue end
+        if isTeam and not Nova.Settings.ESP.ShowTeam then continue end
+
+        table.insert(out, {
+            Player = plr,
+            Character = char,
+            Humanoid = hum,
+            Root = root,
+            Head = char:FindFirstChild("Head"),
+            UpperTorso = char:FindFirstChild("UpperTorso"),
+            LowerTorso = char:FindFirstChild("LowerTorso"),
+            HitboxHead = char:FindFirstChild("HitboxHead"),
+            HitboxBody = char:FindFirstChild("HitboxBody"),
+            IsTeam = isTeam,
+        })
+    end
+    return out
+end
+
+-- Check line of sight (whether part is visible from camera)
+function Game:IsVisible(part, ignoreList)
+    if not part then return false end
+    local origin = Camera.CFrame.Position
+    local target = part.Position
+    local dir = (target - origin)
+    if dir.Magnitude < 1 then return true end
+
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    local filter = {}
+    if LP.Character then table.insert(filter, LP.Character) end
+    if ignoreList then
+        for _, v in ipairs(ignoreList) do table.insert(filter, v) end
+    end
+    params.FilterDescendantsInstances = filter
+    params.IgnoreWater = true
+
+    local result = Workspace:Raycast(origin, dir, params)
+    if not result then return true end
+    return result.Instance:IsDescendantOf(part.Parent)
+end
+
+-- Get distance to part
+local function distanceTo(part)
+    if not part or not LP.Character then return math.huge end
+    local myRoot = LP.Character:FindFirstChild("HumanoidRootPart")
+    if not myRoot then return math.huge end
+    return (part.Position - myRoot.Position).Magnitude
+end
+
+-- ═══════════════════════════════════════════════════════════════
+--  Camera FOV circle (aimbot indicator)
+-- ═══════════════════════════════════════════════════════════════
+local fovGui, fovCircle
+
+local function createFOVCircle()
+    fovGui = keep(Instance.new("ScreenGui"))
+    fovGui.Name = "NovaFOV"
+    fovGui.IgnoreGuiInset = true
+    fovGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    fovGui.ResetOnSpawn = false
+    fovGui.Parent = gethui()
+
+    fovCircle = keep(Instance.new("Frame"))
+    fovCircle.Name = "FOVCircle"
+    fovCircle.AnchorPoint = Vector2.new(0.5, 0.5)
+    fovCircle.Position = UDim2.fromScale(0.5, 0.5)
+    fovCircle.BackgroundTransparency = 1
+    fovCircle.BorderSizePixel = 0
+    fovCircle.Visible = false
+    fovCircle.Parent = fovGui
+
+    local stroke = keep(Instance.new("UIStroke"))
+    stroke.Thickness = 1.5
+    stroke.Color = Color3.fromRGB(255, 60, 60)
+    stroke.Transparency = 0.4
+    stroke.Parent = fovCircle
+
+    local corner = keep(Instance.new("UICorner"))
+    corner.CornerRadius = UDim.new(1, 0)
+    corner.Parent = fovCircle
+end
+
+local function updateFOVCircle()
+    if not fovCircle then return end
+    local radius = Nova.Settings.Aimbot.FOV
+    local size = radius * 2
+    fovCircle.Size = UDim2.fromOffset(size, size)
+    fovCircle.Visible = Nova.Settings.Aimbot.Enabled and Nova.Settings.Aimbot.FOVVisible
+end
+
+-- ═══════════════════════════════════════════════════════════════
+--  ESP system
+-- ═══════════════════════════════════════════════════════════════
+local espGui = keep(Instance.new("ScreenGui"))
+espGui.Name = "NovaESP"
+espGui.IgnoreGuiInset = true
+espGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+espGui.ResetOnSpawn = false
+espGui.DisplayOrder = 100
+espGui.Parent = gethui()
+
+local ESP = {}
+ESP.Drawing = {}   -- [player] = { drawObjects... }
+ESP.Connections = {}
+
+local FONT = Enum.Font.GothamBold
+local TEXT_SIZE = 14
+
+local function newDrawing(class, props)
+    if not Drawing then return nil end
+    local d = Drawing.new(class)
+    for k, v in pairs(props or {}) do d[k] = v end
+    d.Visible = true
+    return d
+end
+
+-- Create ESP for one player
+local function createPlayerESP(plr)
+    if plr == LP then return end
+    if ESP.Drawing[plr] then return end
+
+    local objects = {}
+
+    if Drawing then
+        objects.Box = newDrawing("Square", {
+            Color = Nova.Settings.ESP.BoxColor,
+            Thickness = 1,
+            Filled = false,
+            Visible = false,
+        })
+        objects.Name = newDrawing("Text", {
+            Text = plr.Name,
+            Color = Nova.Settings.ESP.TextColor,
+            Size = TEXT_SIZE,
+            Font = 2,  -- GothamBold
+            Center = true,
+            Outline = true,
+            OutlineColor = Color3.new(0, 0, 0),
+            Visible = false,
+        })
+        objects.Health = newDrawing("Text", {
+            Text = "",
+            Color = Nova.Settings.ESP.HealthColor,
+            Size = TEXT_SIZE - 2,
+            Font = 2,
+            Center = true,
+            Outline = true,
+            OutlineColor = Color3.new(0, 0, 0),
+            Visible = false,
+        })
+        objects.Distance = newDrawing("Text", {
+            Text = "",
+            Color = Color3.fromRGB(200, 200, 200),
+            Size = TEXT_SIZE - 3,
+            Font = 2,
+            Center = true,
+            Outline = true,
+            OutlineColor = Color3.new(0, 0, 0),
+            Visible = false,
+        })
+        objects.Tracer = newDrawing("Line", {
+            Color = Nova.Settings.ESP.TracerColor,
+            Thickness = 1,
+            Visible = false,
+        })
+        objects.HeadDot = newDrawing("Circle", {
+            Color = Color3.fromRGB(255, 100, 100),
+            Radius = 4,
+            Filled = true,
+            Visible = false,
+        })
+    else
+        -- Fallback: BillboardGui
+        local bb = keep(Instance.new("BillboardGui"))
+        bb.Name = "NovaESP_" .. plr.Name
+        bb.Size = UDim2.fromOffset(200, 60)
+        bb.StudsOffset = Vector3.new(0, 3, 0)
+        bb.AlwaysOnTop = true
+        bb.Enabled = false
+        objects.Billboard = bb
+
+        local nameLabel = keep(Instance.new("TextLabel"))
+        nameLabel.Name = "NameLabel"
+        nameLabel.Size = UDim2.new(1, 0, 0, 18)
+        nameLabel.BackgroundTransparency = 1
+        nameLabel.TextColor3 = Nova.Settings.ESP.TextColor
+        nameLabel.TextStrokeTransparency = 0
+        nameLabel.Font = FONT
+        nameLabel.TextSize = TEXT_SIZE
+        nameLabel.Text = plr.Name
+        nameLabel.Parent = bb
+
+        local healthLabel = keep(Instance.new("TextLabel"))
+        healthLabel.Name = "HealthLabel"
+        healthLabel.Size = UDim2.new(1, 0, 0, 14)
+        healthLabel.Position = UDim2.new(0, 0, 0, 18)
+        healthLabel.BackgroundTransparency = 1
+        healthLabel.TextColor3 = Nova.Settings.ESP.HealthColor
+        healthLabel.TextStrokeTransparency = 0
+        healthLabel.Font = FONT
+        healthLabel.TextSize = TEXT_SIZE - 2
+        healthLabel.Text = ""
+        healthLabel.Parent = bb
+    end
+
+    ESP.Drawing[plr] = objects
+end
+
+local function removePlayerESP(plr)
+    local objects = ESP.Drawing[plr]
+    if not objects then return end
+    for _, d in pairs(objects) do
+        if typeof(d) == "Instance" then
+            pcall(function() d:Destroy() end)
+        elseif type(d) == "table" and d.Remove then
+            pcall(function() d:Remove() end)
+        end
+    end
+    ESP.Drawing[plr] = nil
+end
+
+-- Chams (Highlight instances)
+local chamsHighlights = {}
+
+local function applyChams(char)
+    if not char then return end
+    if chamsHighlights[char] then return end
+    local hl = keep(Instance.new("Highlight"))
+    hl.Name = "NovaChams"
+    hl.Adornee = char
+    hl.FillColor = Nova.Settings.ESP.ChamsColor
+    hl.FillTransparency = Nova.Settings.ESP.ChamsFill
+    hl.OutlineColor = Nova.Settings.ESP.ChamsColor
+    hl.OutlineTransparency = Nova.Settings.ESP.ChamsOutline
+    hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+    hl.Parent = espGui
+    chamsHighlights[char] = hl
+end
+
+local function removeChams(char)
+    if chamsHighlights[char] then
+        pcall(function() chamsHighlights[char]:Destroy() end)
+        chamsHighlights[char] = nil
+    end
+end
+
+-- Update ESP for one player (called every RenderStepped)
+local function updatePlayerESP(plr)
+    local objects = ESP.Drawing[plr]
+    if not objects then return end
+    if not Nova.Settings.ESP.Enabled then
+        if objects.Box then objects.Box.Visible = false end
+        if objects.Name then objects.Name.Visible = false end
+        if objects.Health then objects.Health.Visible = false end
+        if objects.Distance then objects.Distance.Visible = false end
+        if objects.Tracer then objects.Tracer.Visible = false end
+        if objects.HeadDot then objects.HeadDot.Visible = false end
+        if objects.Billboard then objects.Billboard.Enabled = false end
+        return
+    end
+
+    local char = plr.Character
+    if not char then return end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    local root = char:FindFirstChild("HumanoidRootPart")
+    local head = char:FindFirstChild("Head")
+    if not hum or not root or not head then
+        if objects.Box then objects.Box.Visible = false end
+        if objects.Name then objects.Name.Visible = false end
+        if objects.Health then objects.Health.Visible = false end
+        if objects.Distance then objects.Distance.Visible = false end
+        if objects.Tracer then objects.Tracer.Visible = false end
+        if objects.HeadDot then objects.HeadDot.Visible = false end
+        if objects.Billboard then objects.Billboard.Enabled = false end
+        return
+    end
+
+    -- Team check
+    local myTeam = LP:GetAttribute("TeamID")
+    local plrTeam = plr:GetAttribute("TeamID")
+    local isTeam = (myTeam ~= nil and plrTeam ~= nil and myTeam == plrTeam)
+    if isTeam and not Nova.Settings.ESP.ShowTeam then
+        if objects.Box then objects.Box.Visible = false end
+        if objects.Name then objects.Name.Visible = false end
+        if objects.Health then objects.Health.Visible = false end
+        if objects.Distance then objects.Distance.Visible = false end
+        if objects.Tracer then objects.Tracer.Visible = false end
+        if objects.HeadDot then objects.HeadDot.Visible = false end
+        return
+    end
+
+    -- Environment check
+    local myEnv = LP:GetAttribute("EnvironmentID")
+    local plrEnv = plr:GetAttribute("EnvironmentID")
+    if myEnv and plrEnv and myEnv ~= plrEnv then
+        if objects.Box then objects.Box.Visible = false end
+        if objects.Name then objects.Name.Visible = false end
+        return
+    end
+
+    -- Distance
+    local dist = (root.Position - Camera.CFrame.Position).Magnitude
+    if dist > Nova.Settings.ESP.MaxDistance then
+        if objects.Box then objects.Box.Visible = false end
+        if objects.Name then objects.Name.Visible = false end
+        if objects.Health then objects.Health.Visible = false end
+        if objects.Distance then objects.Distance.Visible = false end
+        if objects.Tracer then objects.Tracer.Visible = false end
+        if objects.HeadDot then objects.HeadDot.Visible = false end
+        return
+    end
+
+    -- World-to-screen for head and feet
+    local headPos, headOnScreen = Camera:WorldToViewportPoint(head.Position + Vector3.new(0, 0.5, 0))
+    local rootPos, rootOnScreen = Camera:WorldToViewportPoint(root.Position - Vector3.new(0, 3, 0))
+
+    if not (headOnScreen and rootOnScreen) then
+        if objects.Box then objects.Box.Visible = false end
+        if objects.Name then objects.Name.Visible = false end
+        if objects.Health then objects.Health.Visible = false end
+        if objects.Distance then objects.Distance.Visible = false end
+        if objects.Tracer then objects.Tracer.Visible = false end
+        if objects.HeadDot then objects.HeadDot.Visible = false end
+        return
+    end
+
+    local height = math.abs(rootPos.Y - headPos.Y)
+    local width = height / 2
+    local boxPos = Vector2.new(headPos.X - width / 2, headPos.Y)
+    local boxSize = Vector2.new(width, height)
+
+    -- Box
+    if Drawing and objects.Box then
+        objects.Box.Visible = Nova.Settings.ESP.Box
+        objects.Box.Color = Nova.Settings.ESP.BoxColor
+        objects.Box.Size = boxSize
+        objects.Box.Position = boxPos
+    end
+
+    -- Name
+    if Drawing and objects.Name then
+        objects.Name.Visible = Nova.Settings.ESP.Name
+        objects.Name.Text = plr.DisplayName or plr.Name
+        objects.Name.Position = Vector2.new(boxPos.X + width / 2, boxPos.Y - 16)
+        objects.Name.Size = TEXT_SIZE
+    end
+
+    -- Health
+    if Drawing and objects.Health then
+        objects.Health.Visible = Nova.Settings.ESP.Health and hum.Health > 0
+        objects.Health.Text = string.format("%d HP", math.floor(hum.Health))
+        objects.Health.Position = Vector2.new(boxPos.X + width / 2, boxPos.Y + height + 2)
+    end
+
+    -- Distance
+    if Drawing and objects.Distance then
+        objects.Distance.Visible = Nova.Settings.ESP.Distance
+        objects.Distance.Text = string.format("[%d]", math.floor(dist))
+        objects.Distance.Position = Vector2.new(boxPos.X + width / 2, boxPos.Y + height + 18)
+    end
+
+    -- Tracer (from bottom center of screen to box bottom)
+    if Drawing and objects.Tracer then
+        objects.Tracer.Visible = Nova.Settings.ESP.Tracer
+        objects.Tracer.From = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y)
+        objects.Tracer.To = Vector2.new(boxPos.X + width / 2, boxPos.Y + height)
+        objects.Tracer.Color = Nova.Settings.ESP.TracerColor
+    end
+
+    -- Head dot
+    if Drawing and objects.HeadDot then
+        objects.HeadDot.Visible = Nova.Settings.ESP.HeadDot
+        objects.HeadDot.Position = Vector2.new(headPos.X, headPos.Y)
+    end
+
+    -- Fallback billboard
+    if not Drawing and objects.Billboard then
+        objects.Billboard.Enabled = true
+        objects.Billboard.Adornee = head
+        local nameLabel = objects.Billboard:FindFirstChild("NameLabel")
+        if nameLabel then nameLabel.Text = (Nova.Settings.ESP.Name and (plr.DisplayName or plr.Name)) or "" end
+        local healthLabel = objects.Billboard:FindFirstChild("HealthLabel")
+        if healthLabel then
+            healthLabel.Text = Nova.Settings.ESP.Health and (string.format("%d HP", math.floor(hum.Health))) or ""
+        end
+    end
+
+    -- Chams
+    if Nova.Settings.ESP.Chams then
+        applyChams(char)
+    else
+        removeChams(char)
+    end
+end
+
+-- ═══════════════════════════════════════════════════════════════
+--  Aimbot
+-- ═══════════════════════════════════════════════════════════════
+local aimbotActive = false
+local currentTarget = nil
+
+local function getFOVTarget()
+    if not LP.Character then return nil end
+    local myRoot = LP.Character:FindFirstChild("HumanoidRootPart")
+    if not myRoot then return nil end
+
+    local mouse = UserInputService:GetMouseLocation()
+    local camPos = Camera.ViewportSize
+    local center = Vector2.new(camPos.X / 2, camPos.Y / 2)
+
+    local bestTarget = nil
+    local bestDist = Nova.Settings.Aimbot.FOV
+
+    for _, fighter in ipairs(Game:GetFighters()) do
+        local part = fighter.Head
+        if Nova.Settings.Aimbot.TargetPart == "Body" then
+            part = fighter.UpperTorso or fighter.LowerTorso or fighter.Root
+        end
+        if not part then continue end
+
+        local dist = distanceTo(part)
+        if dist > Nova.Settings.Aimbot.MaxDistance then continue end
+
+        -- Screen position
+        local screen, onScreen = Camera:WorldToViewportPoint(part.Position)
+        if not onScreen then continue end
+        local screenVec = Vector2.new(screen.X, screen.Y)
+
+        -- FOV check
+        local screenDist = (screenVec - center).Magnitude
+        if screenDist > Nova.Settings.Aimbot.FOV then continue end
+
+        -- Wall check
+        if Nova.Settings.Aimbot.WallCheck and Nova.Settings.Aimbot.VisibleOnly then
+            if not Game:IsVisible(part, { fighter.Character }) then continue end
+        end
+
+        if screenDist < bestDist then
+            bestDist = screenDist
+            bestTarget = { fighter = fighter, part = part, position = part.Position, screen = screenVec }
+        end
+    end
+    return bestTarget
+end
+
+local function updateAimbot()
+    if not Nova.Settings.Aimbot.Enabled or not aimbotActive then
+        currentTarget = nil
+        return
+    end
+
+    local target = getFOVTarget()
+    if not target then
+        currentTarget = nil
+        return
+    end
+    currentTarget = target
+
+    -- Aim
+    local targetPos = target.position
+    local lookCFrame = CFrame.new(Camera.CFrame.Position, targetPos)
+    local smooth = Nova.Settings.Aimbot.Smoothing
+
+    if smooth <= 0 then
+        Camera.CFrame = lookCFrame
+    else
+        Camera.CFrame = Camera.CFrame:Lerp(lookCFrame, math.clamp(1 - smooth, 0.05, 1))
+    end
+end
+
+-- ═══════════════════════════════════════════════════════════════
+--  Silent Aim (hooks projectile remotes)
+-- ═══════════════════════════════════════════════════════════════
+local silentAimActive = false
+local originalFireServer
+local hookedRemote
+
+-- Find the UseItem remote in Rivals
+local function findUseItemRemote()
+    local remotes = ReplicatedStorage:FindFirstChild("Remotes")
+    if not remotes then return nil end
+    local repl = remotes:FindFirstChild("Replication")
+    if not repl then return nil end
+    local fighter = repl:FindFirstChild("Fighter")
+    if not fighter then return nil end
+    return fighter:FindFirstChild("UseItem")
+end
+
+local function getSilentAimTarget()
+    if not LP.Character then return nil end
+    local myRoot = LP.Character:FindFirstChild("HumanoidRootPart")
+    if not myRoot then return nil end
+
+    local center = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
+    local best, bestDist = nil, Nova.Settings.SilentAim.FOV
+
+    for _, fighter in ipairs(Game:GetFighters()) do
+        local part = fighter.Head
+        if not part then continue end
+        local dist = distanceTo(part)
+        if dist > 1000 then continue end
+
+        local screen, onScreen = Camera:WorldToViewportPoint(part.Position)
+        if not onScreen then continue end
+        local screenVec = Vector2.new(screen.X, screen.Y)
+        local screenDist = (screenVec - center).Magnitude
+        if screenDist > Nova.Settings.SilentAim.FOV then continue end
+
+        if Nova.Settings.SilentAim.WallCheck then
+            if not Game:IsVisible(part, { fighter.Character }) then continue end
+        end
+
+        if screenDist < bestDist then
+            bestDist = screenDist
+            best = { part = part, fighter = fighter }
+        end
+    end
+    return best
+end
+
+-- Simplified silent aim: hook remote fire, replace CFrame args
+local function installSilentAim()
+    if hookedRemote then return end
+    local remote = findUseItemRemote()
+    if not remote then
+        warn("[Nova] UseItem remote not found - Silent Aim disabled")
+        return
+    end
+    hookedRemote = remote
+
+    -- Use hookmetamethod if available
+    local hookFn = hookmetamethod or hookfunction
+    if not hookFn then
+        warn("[Nova] hookmetamethod/hookfunction not available - Silent Aim disabled")
+        return
+    end
+
+    -- For simplicity, we use hookmetamethod on __namecall
+    local mt = getrawmetatable(game)
+    local oldNamecall = mt.__namecall
+    setreadonly(mt, false)
+
+    mt.__namecall = newcclosure(function(self, ...)
+        local method = getnamecallmethod()
+        if method == "FireServer" and self == hookedRemote and Nova.Settings.SilentAim.Enabled and silentAimActive then
+            if math.random() * 100 <= Nova.Settings.SilentAim.Chance then
+                local target = getSilentAimTarget()
+                if target then
+                    local args = { ... }
+                    -- args[1] = objectId
+                    -- args[2] = encoded enum (StartShooting)
+                    -- args[3] = payload table { ["\1"] = { ["\0"] = originCF, ["\1"] = dirCF, ["\2"] = hitbox } }
+                    local payload = args[3]
+                    if type(payload) == "table" then
+                        local inner = payload["\1"]
+                        if type(inner) == "table" then
+                            local newCF = CFrame.new(Camera.CFrame.Position, target.part.Position)
+                            inner["\0"] = newCF
+                            inner["\1"] = newCF
+                            inner["\2"] = target.part
+                        end
+                    end
+                end
+            end
+        end
+        return oldNamecall(self, ...)
+    end)
+
+    setreadonly(mt, true)
+end
+
+-- ═══════════════════════════════════════════════════════════════
+--  Triggerbot
+-- ═══════════════════════════════════════════════════════════════
+local lastTrigger = 0
+
+local function updateTriggerbot()
+    if not Nova.Settings.Triggerbot.Enabled then return end
+    if not LP.Character then return end
+    local hum = LP.Character:FindFirstChildOfClass("Humanoid")
+    if not hum or hum.Health <= 0 then return end
+
+    local now = tick()
+    if now - lastTrigger < Nova.Settings.Triggerbot.Delay then return end
+
+    -- Check if mouse is over an enemy
+    local mouse = UserInputService:GetMouseLocation()
+    local ray = Camera:ViewportPointToRay(mouse.X, mouse.Y)
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances = { LP.Character }
+    local result = Workspace:Raycast(ray.Origin, ray.Direction * 1000, params)
+
+    if not result then return end
+    local hitChar = result.Instance:FindFirstAncestorOfClass("Model")
+    if not hitChar then return end
+    local hitPlr = Players:GetPlayerFromCharacter(hitChar)
+    if not hitPlr or hitPlr == LP then return end
+
+    local myTeam = LP:GetAttribute("TeamID")
+    local plrTeam = hitPlr:GetAttribute("TeamID")
+    if myTeam and plrTeam and myTeam == plrTeam then return end
+
+    -- Fire
+    lastTrigger = now
+    local vim = game:GetService("VirtualInputManager")
+    if vim then
+        vim:SendMouseButtonEvent(mouse.X, mouse.Y, 0, true, game, 0)
+        task.wait(0.01)
+        vim:SendMouseButtonEvent(mouse.X, mouse.Y, 0, false, game, 0)
+    end
+end
+
+-- ═══════════════════════════════════════════════════════════════
+--  Input handling
+-- ═══════════════════════════════════════════════════════════════
+local aimbotKeyDown = false
+local silentAimKeyDown = false
+
+track(UserInputService.InputBegan:Connect(function(input, gp)
+    if gp then return end
+
+    local aimKey = getKeyByName(Nova.Settings.Aimbot.Key)
+    if input.KeyCode == aimKey or input.UserInputType == aimKey then
+        aimbotKeyDown = true
+        aimbotActive = true
+    end
+
+    local saKey = getKeyByName(Nova.Settings.SilentAim.Key)
+    if input.KeyCode == saKey or input.UserInputType == saKey then
+        silentAimKeyDown = true
+        silentAimActive = true
+    end
+
+    if input.KeyCode == Nova.Settings.MenuKey then
+        if Nova.UI then Nova.UI:Toggle() end
+    end
+    if input.KeyCode == Enum.KeyCode.F1 then
+        Nova.Settings.ESP.Enabled = not Nova.Settings.ESP.Enabled
+        notify("ESP: " .. tostring(Nova.Settings.ESP.Enabled))
+    end
+    if input.KeyCode == Enum.KeyCode.F2 then
+        Nova.Settings.Aimbot.Enabled = not Nova.Settings.Aimbot.Enabled
+        notify("Aimbot: " .. tostring(Nova.Settings.Aimbot.Enabled))
+    end
+    if input.KeyCode == Enum.KeyCode.F3 then
+        Nova.Settings.SilentAim.Enabled = not Nova.Settings.SilentAim.Enabled
+        notify("SilentAim: " .. tostring(Nova.Settings.SilentAim.Enabled))
+    end
+    if input.KeyCode == Enum.KeyCode.End then
+        Nova.Unload()
+    end
+end))
+
+track(UserInputService.InputEnded:Connect(function(input, gp)
+    local aimKey = getKeyByName(Nova.Settings.Aimbot.Key)
+    if input.KeyCode == aimKey or input.UserInputType == aimKey then
+        aimbotKeyDown = false
+        aimbotActive = false
+    end
+
+    local saKey = getKeyByName(Nova.Settings.SilentAim.Key)
+    if input.KeyCode == saKey or input.UserInputType == saKey then
+        silentAimKeyDown = false
+        silentAimActive = false
+    end
+end))
+
+-- ═══════════════════════════════════════════════════════════════
+--  Notification system
+-- ═══════════════════════════════════════════════════════════════
+local notifGui = keep(Instance.new("ScreenGui"))
+notifGui.Name = "NovaNotify"
+notifGui.IgnoreGuiInset = true
+notifGui.ResetOnSpawn = false
+notifGui.DisplayOrder = 200
+notifGui.Parent = gethui()
+
+local notifFrame = keep(Instance.new("Frame"))
+notifFrame.AnchorPoint = Vector2.new(1, 0)
+notifFrame.Position = UDim2.new(1, -20, 0, 20)
+notifFrame.Size = UDim2.fromOffset(280, 400)
+notifFrame.BackgroundTransparency = 1
+notifFrame.Parent = notifGui
+
+local notifLayout = keep(Instance.new("UIListLayout"))
+notifLayout.Padding = UDim.new(0, 6)
+notifLayout.SortOrder = Enum.SortOrder.LayoutOrder
+notifLayout.HorizontalAlignment = Enum.HorizontalAlignment.Right
+notifLayout.Parent = notifFrame
+
+function notify(text)
+    local label = keep(Instance.new("TextLabel"))
+    label.Size = UDim2.fromOffset(240, 32)
+    label.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+    label.BackgroundTransparency = 0.1
+    label.TextColor3 = Color3.fromRGB(255, 100, 100)
+    label.Font = Enum.Font.GothamBold
+    label.TextSize = 13
+    label.Text = "  [Nova] " .. tostring(text)
+    label.TextXAlignment = Enum.TextXAlignment.Left
+    label.Parent = notifFrame
+
+    local corner = keep(Instance.new("UICorner"))
+    corner.CornerRadius = UDim.new(0, 6)
+    corner.Parent = label
+
+    local stroke = keep(Instance.new("UIStroke"))
+    stroke.Color = Color3.fromRGB(255, 60, 60)
+    stroke.Transparency = 0.5
+    stroke.Parent = label
+
+    task.delay(3, function()
+        if label.Parent then
+            local tween = TweenService:Create(label, TweenInfo.new(0.3), {
+                BackgroundTransparency = 1, TextTransparency = 1,
+            })
+            tween:Play()
+            tween.Completed:Wait()
+            label:Destroy()
+        end
+    end)
+end
+
+-- ═══════════════════════════════════════════════════════════════
+--  Minimal menu UI
+-- ═══════════════════════════════════════════════════════════════
+local Menu = {}
+Menu.__index = Menu
+
+function Menu.new()
+    local self = setmetatable({}, Menu)
+    self.Visible = true
+
+    self.Gui = keep(Instance.new("ScreenGui"))
+    self.Gui.Name = "NovaMenu"
+    self.Gui.IgnoreGuiInset = true
+    self.Gui.ResetOnSpawn = false
+    self.Gui.DisplayOrder = 300
+    self.Gui.Parent = gethui()
+
+    self.Frame = keep(Instance.new("Frame"))
+    self.Frame.AnchorPoint = Vector2.new(0, 0)
+    self.Frame.Position = UDim2.fromOffset(40, 100)
+    self.Frame.Size = UDim2.fromOffset(280, 420)
+    self.Frame.BackgroundColor3 = Color3.fromRGB(15, 15, 18)
+    self.Frame.BorderSizePixel = 0
+    self.Frame.Parent = self.Gui
+
+    local corner = keep(Instance.new("UICorner"))
+    corner.CornerRadius = UDim.new(0, 8)
+    corner.Parent = self.Frame
+
+    local stroke = keep(Instance.new("UIStroke"))
+    stroke.Color = Color3.fromRGB(255, 60, 60)
+    stroke.Transparency = 0.3
+    stroke.Parent = self.Frame
+
+    -- Title
+    local title = keep(Instance.new("TextLabel"))
+    title.Size = UDim2.new(1, 0, 0, 40)
+    title.BackgroundTransparency = 1
+    title.Text = "NOVA"
+    title.TextColor3 = Color3.fromRGB(255, 60, 60)
+    title.Font = Enum.Font.GothamBold
+    title.TextSize = 22
+    title.Parent = self.Frame
+
+    local subtitle = keep(Instance.new("TextLabel"))
+    subtitle.Position = UDim2.fromOffset(0, 38)
+    subtitle.Size = UDim2.new(1, 0, 0, 16)
+    subtitle.BackgroundTransparency = 1
+    subtitle.Text = "Aimbot & ESP"
+    subtitle.TextColor3 = Color3.fromRGB(150, 150, 150)
+    subtitle.Font = Enum.Font.Gotham
+    subtitle.TextSize = 11
+    subtitle.Parent = self.Frame
+
+    -- Scroll container
+    local scroll = keep(Instance.new("ScrollingFrame"))
+    scroll.Position = UDim2.fromOffset(10, 60)
+    scroll.Size = UDim2.new(1, -20, 1, -70)
+    scroll.BackgroundTransparency = 1
+    scroll.BorderSizePixel = 0
+    scroll.ScrollBarThickness = 3
+    scroll.ScrollBarImageColor3 = Color3.fromRGB(255, 60, 60)
+    scroll.CanvasSize = UDim2.new()
+    scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    scroll.Parent = self.Frame
+
+    local layout = keep(Instance.new("UIListLayout"))
+    layout.Padding = UDim.new(0, 6)
+    layout.SortOrder = Enum.SortOrder.LayoutOrder
+    layout.Parent = scroll
+
+    self.Scroll = scroll
+    self.Layout = layout
+
+    self:_buildContent()
+    self:_makeDraggable(title)
+    return self
+end
+
+function Menu:_addToggle(parent, name, get, set)
+    local btn = keep(Instance.new("TextButton"))
+    btn.Size = UDim2.new(1, 0, 0, 28)
+    btn.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
+    btn.BorderSizePixel = 0
+    btn.Text = ""
+    btn.AutoButtonColor = false
+    btn.Parent = parent
+
+    local c = keep(Instance.new("UICorner"))
+    c.CornerRadius = UDim.new(0, 5)
+    c.Parent = btn
+
+    local lbl = keep(Instance.new("TextLabel"))
+    lbl.Size = UDim2.new(1, -50, 1, 0)
+    lbl.Position = UDim2.fromOffset(12, 0)
+    lbl.BackgroundTransparency = 1
+    lbl.Text = name
+    lbl.TextColor3 = Color3.fromRGB(220, 220, 220)
+    lbl.Font = Enum.Font.Gotham
+    lbl.TextSize = 13
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.Parent = btn
+
+    local dot = keep(Instance.new("Frame"))
+    dot.AnchorPoint = Vector2.new(1, 0.5)
+    dot.Position = UDim2.new(1, -10, 0.5, 0)
+    dot.Size = UDim2.fromOffset(30, 16)
+    dot.BackgroundColor3 = Color3.fromRGB(40, 40, 45)
+    dot.BorderSizePixel = 0
+    dot.Parent = btn
+
+    local dc = keep(Instance.new("UICorner"))
+    dc.CornerRadius = UDim.new(1, 0)
+    dc.Parent = dot
+
+    local knob = keep(Instance.new("Frame"))
+    knob.Size = UDim2.fromOffset(12, 12)
+    knob.Position = UDim2.fromOffset(2, 2)
+    knob.BackgroundColor3 = Color3.fromRGB(120, 120, 120)
+    knob.BorderSizePixel = 0
+    knob.Parent = dot
+
+    local kc = keep(Instance.new("UICorner"))
+    kc.CornerRadius = UDim.new(1, 0)
+    kc.Parent = knob
+
+    local function refresh()
+        local on = get()
+        dot.BackgroundColor3 = on and Color3.fromRGB(255, 60, 60) or Color3.fromRGB(40, 40, 45)
+        knob.BackgroundColor3 = on and Color3.fromRGB(255, 255, 255) or Color3.fromRGB(120, 120, 120)
+        TweenService:Create(knob, TweenInfo.new(0.15), {
+            Position = on and UDim2.fromOffset(16, 2) or UDim2.fromOffset(2, 2),
+        }):Play()
+    end
+    refresh()
+
+    btn.MouseButton1Click:Connect(function()
+        set(not get())
+        refresh()
+    end)
+
+    return { refresh = refresh }
+end
+
+function Menu:_addSlider(parent, name, min, max, step, get, set)
+    local frame = keep(Instance.new("Frame"))
+    frame.Size = UDim2.new(1, 0, 0, 42)
+    frame.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
+    frame.BorderSizePixel = 0
+    frame.Parent = parent
+
+    local c = keep(Instance.new("UICorner"))
+    c.CornerRadius = UDim.new(0, 5)
+    c.Parent = frame
+
+    local lbl = keep(Instance.new("TextLabel"))
+    lbl.Size = UDim2.new(1, -20, 0, 18)
+    lbl.Position = UDim2.fromOffset(10, 2)
+    lbl.BackgroundTransparency = 1
+    lbl.Text = name .. ": " .. tostring(get())
+    lbl.TextColor3 = Color3.fromRGB(220, 220, 220)
+    lbl.Font = Enum.Font.Gotham
+    lbl.TextSize = 12
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.Parent = frame
+
+    local bar = keep(Instance.new("TextButton"))
+    bar.Position = UDim2.fromOffset(10, 26)
+    bar.Size = UDim2.new(1, -20, 0, 8)
+    bar.BackgroundColor3 = Color3.fromRGB(40, 40, 45)
+    bar.BorderSizePixel = 0
+    bar.Text = ""
+    bar.AutoButtonColor = false
+    bar.Parent = frame
+
+    local bc = keep(Instance.new("UICorner"))
+    bc.CornerRadius = UDim.new(1, 0)
+    bc.Parent = bar
+
+    local fill = keep(Instance.new("Frame"))
+    fill.Size = UDim2.new((get() - min) / (max - min), 0, 1, 0)
+    fill.BackgroundColor3 = Color3.fromRGB(255, 60, 60)
+    fill.BorderSizePixel = 0
+    fill.Parent = bar
+
+    local fc = keep(Instance.new("UICorner"))
+    fc.CornerRadius = UDim.new(1, 0)
+    fc.Parent = fill
+
+    local dragging = false
+
+    local function update(x)
+        local rel = math.clamp((x - bar.AbsolutePosition.X) / bar.AbsoluteSize.X, 0, 1)
+        local val = min + rel * (max - min)
+        val = math.floor(val / step + 0.5) * step
+        val = math.clamp(val, min, max)
+        fill.Size = UDim2.new((val - min) / (max - min), 0, 1, 0)
+        lbl.Text = name .. ": " .. (step < 1 and string.format("%.2f", val) or tostring(math.floor(val)))
+        set(val)
+    end
+
+    bar.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging = true
+            update(input.Position.X)
+        end
+    end)
+    track(UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging = false
+        end
+    end))
+    track(UserInputService.InputChanged:Connect(function(input)
+        if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+            update(input.Position.X)
+        end
+    end))
+
+    return { setText = function(t) lbl.Text = t end }
+end
+
+function Menu:_section(parent, name)
+    local lbl = keep(Instance.new("TextLabel"))
+    lbl.Size = UDim2.new(1, 0, 0, 22)
+    lbl.BackgroundTransparency = 1
+    lbl.Text = name
+    lbl.TextColor3 = Color3.fromRGB(255, 60, 60)
+    lbl.Font = Enum.Font.GothamBold
+    lbl.TextSize = 13
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.Parent = parent
+    return lbl
+end
+
+function Menu:_buildContent()
+    local s = self.Scroll
+    local S = Nova.Settings
+
+    self:_section(s, "AIMBOT")
+    self:_addToggle(s, "Enable Aimbot", function() return S.Aimbot.Enabled end, function(v) S.Aimbot.Enabled = v end)
+    self:_addSlider(s, "FOV", 10, 600, 1, function() return S.Aimbot.FOV end, function(v) S.Aimbot.FOV = v updateFOVCircle() end)
+    self:_addSlider(s, "Smoothing", 0, 1, 0.01, function() return S.Aimbot.Smoothing end, function(v) S.Aimbot.Smoothing = v end)
+
+    self:_section(s, "SILENT AIM")
+    self:_addToggle(s, "Enable Silent Aim", function() return S.SilentAim.Enabled end, function(v) S.SilentAim.Enabled = v end)
+    self:_addSlider(s, "Chance %", 0, 100, 1, function() return S.SilentAim.Chance end, function(v) S.SilentAim.Chance = v end)
+    self:_addSlider(s, "FOV", 10, 600, 1, function() return S.SilentAim.FOV end, function(v) S.SilentAim.FOV = v end)
+
+    self:_section(s, "TRIGGERBOT")
+    self:_addToggle(s, "Enable Triggerbot", function() return S.Triggerbot.Enabled end, function(v) S.Triggerbot.Enabled = v end)
+    self:_addSlider(s, "Delay (s)", 0.01, 0.5, 0.01, function() return S.Triggerbot.Delay end, function(v) S.Triggerbot.Delay = v end)
+
+    self:_section(s, "ESP")
+    self:_addToggle(s, "Enable ESP", function() return S.ESP.Enabled end, function(v) S.ESP.Enabled = v end)
+    self:_addToggle(s, "Show Team", function() return S.ESP.ShowTeam end, function(v) S.ESP.ShowTeam = v end)
+    self:_addToggle(s, "Box", function() return S.ESP.Box end, function(v) S.ESP.Box = v end)
+    self:_addToggle(s, "Name", function() return S.ESP.Name end, function(v) S.ESP.Name = v end)
+    self:_addToggle(s, "Health", function() return S.ESP.Health end, function(v) S.ESP.Health = v end)
+    self:_addToggle(s, "Distance", function() return S.ESP.Distance end, function(v) S.ESP.Distance = v end)
+    self:_addToggle(s, "Tracer", function() return S.ESP.Tracer end, function(v) S.ESP.Tracer = v end)
+    self:_addToggle(s, "Chams", function() return S.ESP.Chams end, function(v) S.ESP.Chams = v end)
+    self:_addToggle(s, "Head Dot", function() return S.ESP.HeadDot end, function(v) S.ESP.HeadDot = v end)
+    self:_addSlider(s, "Max Distance", 50, 5000, 50, function() return S.ESP.MaxDistance end, function(v) S.ESP.MaxDistance = v end)
+end
+
+function Menu:_makeDraggable(dragFrame)
+    local dragging = false
+    local dragInput, dragStart, startPos
+    dragFrame.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging = true
+            dragInput = input
+            dragStart = input.Position
+            startPos = self.Frame.Position
+        end
+    end)
+    dragFrame.InputChanged:Connect(function(input)
+        if dragging and input == dragInput then
+            local delta = input.Position - dragStart
+            self.Frame.Position = UDim2.fromOffset(startPos.X.Offset + delta.X, startPos.Y.Offset + delta.Y)
+        end
+    end)
+    track(UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging = false
+            dragInput = nil
+        end
+    end))
+end
+
+function Menu:Toggle()
+    self.Visible = not self.Visible
+    self.Gui.Enabled = self.Visible
+end
+
+-- ═══════════════════════════════════════════════════════════════
+--  Boot loop
+-- ═══════════════════════════════════════════════════════════════
+createFOVCircle()
+updateFOVCircle()
+
+-- Init ESP for existing players
+for _, plr in ipairs(Players:GetPlayers()) do
+    createPlayerESP(plr)
+end
+track(Players.PlayerAdded:Connect(createPlayerESP))
+track(Players.PlayerRemoving:Connect(removePlayerESP))
+
+-- Init menu
+Nova.UI = Menu.new()
+
+-- Install silent aim hook
+task.spawn(installSilentAim)
+
+-- Render loop
+track(RunService.RenderStepped:Connect(function(dt)
+    if Nova.Destroyed then return end
+
+    -- Aimbot
+    updateAimbot()
+
+    -- ESP
+    for plr, _ in pairs(ESP.Drawing) do
+        if plr.Parent then
+            updatePlayerESP(plr)
+        end
+    end
+
+    -- FOV circle position (follows viewport center)
+    if fovCircle then
+        fovCircle.Position = UDim2.fromScale(0.5, 0.5)
+    end
+end))
+
+-- Triggerbot loop
+track(RunService.Heartbeat:Connect(function()
+    if Nova.Destroyed then return end
+    updateTriggerbot()
+end))
+
+-- Camera rebind
+track(Workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
+    Camera = Workspace.CurrentCamera
+end))
+
+-- ═══════════════════════════════════════════════════════════════
+--  Unload
+-- ═══════════════════════════════════════════════════════════════
+function Nova.Unload()
+    if Nova.Destroyed then return end
+    Nova.Destroyed = true
+
+    for _, c in ipairs(Nova.Connections) do
+        pcall(function() c:Disconnect() end)
+    end
+    for _, i in ipairs(Nova.Instances) do
+        pcall(function() i:Destroy() end)
+    end
+    for _, hl in pairs(chamsHighlights) do
+        pcall(function() hl:Destroy() end)
+    end
+    for plr, _ in pairs(ESP.Drawing) do
+        removePlayerESP(plr)
+    end
+    if getgenv().Nova == Nova then
+        getgenv().Nova = nil
+    end
+    print("[Nova] Unloaded.")
+end
+
+-- ═══════════════════════════════════════════════════════════════
+--  Ready
+-- ═══════════════════════════════════════════════════════════════
+notify("Nova loaded successfully!")
+notify("Press [RightShift] to toggle menu")
